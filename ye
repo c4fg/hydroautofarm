@@ -1,6 +1,6 @@
 local config = getgenv().AutofarmConfig or {
-	Winner = "",
-	Loser = "",
+	Winner = "winneruser",
+	Loser = "loseruser",
 	SelectedGun = "Revolver",
 	WebhookUrl = "",
 	WebhookInterval = 120,
@@ -30,7 +30,7 @@ getgenv().LocalPlayer = lp
 
 local char, hum, root
 local Staff = 34199407
-local stopKey = Enum.KeyCode.Q
+local stopKey = Enum.KeyCode.RightShift
 local running = true
 
 local inBox = false
