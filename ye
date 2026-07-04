@@ -1,0 +1,688 @@
+local config = getgenv().AutofarmConfig or {
+	Winner = "",
+	Loser = "",
+	SelectedGun = "Revolver",
+	WebhookUrl = "",
+	WebhookInterval = 120,
+	MaxWinstreak = 100,
+	CustomStaff = {},
+	AlertEveryoneOnStaffJoin = true
+}
+
+local winner = config.Winner
+local loser = config.Loser
+local selectedGun = config.SelectedGun
+local webhookUrl = config.WebhookUrl
+local webhookInterval = config.WebhookInterval
+local maxWinstreak = config.MaxWinstreak
+local CustomStaff = config.CustomStaff
+local alertEveryoneOnStaffJoin = config.AlertEveryoneOnStaffJoin
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualUser = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local lp = Players.LocalPlayer
+getgenv().LocalPlayer = lp
+
+local char, hum, root
+local Staff = 34199407
+local stopKey = Enum.KeyCode.Q
+local running = true
+
+local inBox = false
+local padded = false
+local paused = false
+
+local sharedPadId = nil
+local cons = {}
+
+local startTime = tick()
+local matchCount = 0
+local startingWinstreak = nil
+local highestWinstreak = 0
+local roundStartTime = nil
+local lastMatchDuration = "0s"
+local activeFp = nil
+
+getgenv().MainEvent = getgenv().MainEvent or ReplicatedStorage:WaitForChild("MainEvent")
+
+getgenv().ForceHit = getgenv().ForceHit or {
+	DeathCheck = true,
+	ForceFieldCheck = true,
+	PrefireForceField = false,
+	WallCheck = false,
+	MaxDistance = 9000,
+	HitPart = "HumanoidRootPart",
+	LastShotTime = 0
+}
+
+getgenv().FH_Fire = function(targetPlayer)
+	if not targetPlayer or not targetPlayer.Character then return end
+	local character = targetPlayer.Character
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if getgenv().ForceHit.DeathCheck then
+		if not humanoid or humanoid.Health <= 0 then return end
+		local be = character:FindFirstChild("BodyEffects")
+		if be and be:FindFirstChild("K.O") and be["K.O"].Value then return end
+	end
+	local targetPart = character:FindFirstChild(getgenv().ForceHit.HitPart)
+	if not targetPart then return end
+	if getgenv().ForceHit.ForceFieldCheck and not getgenv().ForceHit.PrefireForceField then
+		if character:FindFirstChildOfClass("ForceField") then return end
+	end
+	local rootPart = getgenv().LocalPlayer.Character and getgenv().LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return end
+	local playerPos = rootPart.Position
+	if getgenv().ForceHit.WallCheck then
+		if getgenv().FH_IsWallBetween and getgenv().FH_IsWallBetween(playerPos, targetPart.Position, character) then return end
+	end
+	if (playerPos - targetPart.Position).Magnitude > getgenv().ForceHit.MaxDistance then return end
+	local args = {
+		[1] = "Shoot",
+		[2] = {
+			[1] = {
+				[1] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[2] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[3] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[4] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+				[5] = {Normal=targetPart.Position,Instance=targetPart,Position=targetPart.Position},
+			},
+			[2] = {
+				[1] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[2] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[3] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[4] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+				[5] = {thePart=targetPart,theOffset=Vector3.new(0,0,0)},
+			},
+			[3] = playerPos,
+			[4] = playerPos,
+			[5] = workspace:GetServerTimeNow()
+		}
+	}
+	pcall(function() getgenv().MainEvent:FireServer(unpack(args)) end)
+	getgenv().ForceHit.LastShotTime = tick()
+end
+
+local function registerConnection(cn)
+	table.insert(cons, cn)
+	return cn
+end
+
+local idledCn = lp.Idled:Connect(function()
+	VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+	task.wait(0.1)
+	VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+end)
+registerConnection(idledCn)
+
+local function getChar()
+	char = lp.Character or lp.CharacterAdded:Wait()
+	hum  = char:WaitForChild("Humanoid")
+	root = char:WaitForChild("HumanoidRootPart")
+end
+getChar()
+
+local charAddedCn = lp.CharacterAdded:Connect(function() 
+	task.wait(1) 
+	getChar() 
+end)
+registerConnection(charAddedCn)
+
+local function tp(cf)
+	if root then root.CFrame = cf end
+end
+
+local function getPads(fp)
+	local j1 = fp:FindFirstChild("JoinFight1")
+	local j2 = fp:FindFirstChild("JoinFight2")
+	if not j1 or not j2 then return nil, nil end
+	return j1:FindFirstChild("Region"), j2:FindFirstChild("Region")
+end
+
+local function isPadAreaClear(fp)
+	if not fp then return false end
+	local r1, r2 = getPads(fp)
+	if not r1 or not r2 then return false end
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Name ~= winner and p.Name ~= loser then
+			local pChar = p.Character
+			local pRoot = pChar and pChar:FindFirstChild("HumanoidRootPart")
+			if pRoot then
+				local distToR1 = (pRoot.Position - r1.Position).Magnitude
+				local distToR2 = (pRoot.Position - r2.Position).Magnitude
+				if distToR1 < 15 or distToR2 < 15 then
+					return false
+				end
+			end
+		end
+	end
+
+	return true
+end
+
+local function findEmptyFightPlace()
+	local boxes = workspace:FindFirstChild("Ignored")
+	if not boxes then return nil end
+	local b = boxes:FindFirstChild("Boxes")
+	if not b then return nil end
+	for _, fp in ipairs(b:GetChildren()) do
+		if fp.Name ~= "FightPlace" then continue end
+		if activeFp and fp == activeFp then continue end
+
+		local p1 = fp:FindFirstChild("Player1")
+		local p2 = fp:FindFirstChild("Player2")
+		if not p1 or not p2 then continue end
+		local v1 = p1.Value
+		local v2 = p2.Value
+		if (v1 == "" or v1 == nil) and (v2 == "" or v2 == nil) then
+			if isPadAreaClear(fp) then
+				return fp
+			end
+		end
+	end
+	return nil
+end
+
+local function bothInCharacters()
+	local folder = workspace:FindFirstChild("Players")
+	if not folder then return false end
+	local chars = folder:FindFirstChild("Characters")
+	if not chars then return false end
+	return chars:FindFirstChild(winner) ~= nil and chars:FindFirstChild(loser) ~= nil
+end
+
+local function inBoxCheck()
+	local f = workspace:FindFirstChild("Players")
+	if not f then return false end
+	local ib = f:FindFirstChild("InBox")
+	if not ib then return false end
+	return ib:FindFirstChild(lp.Name) ~= nil
+end
+
+local function getEnemyRoot()
+	local p = Players:FindFirstChild(loser)
+	if not p or not p.Character then return nil end
+	return p.Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getGunName()
+	return selectedGun == "Revolver" and "[Revolver]" or "[DoubleBarrel]"
+end
+
+local function grabGun()
+	local gunName = getGunName()
+	local bp = lp:FindFirstChild("Backpack")
+	if bp then
+		local g = bp:FindFirstChild(gunName)
+		if g then hum:EquipTool(g) task.wait(0.2) return true end
+	end
+	return char:FindFirstChild(gunName) ~= nil
+end
+
+local function createPlatform(pos)
+	local p = workspace:FindFirstChild("_skyPlate")
+	if not p then
+		p = Instance.new("Part")
+		p.Name = "_skyPlate"
+		p.Size = Vector3.new(20, 1, 20)
+		p.Position = pos - Vector3.new(0, 3.5, 0)
+		p.Anchored = true
+		p.CanCollide = true
+		p.Transparency = 0.5
+		p.Material = Enum.Material.SmoothPlastic
+		p.Parent = workspace
+	end
+	return p
+end
+
+local amWinner = lp.Name == winner
+local amLoser  = lp.Name == loser
+
+local request = (syn and syn.request) or (http and http.request) or request or http_request
+
+local function isStaff(player)
+	for _, val in ipairs(CustomStaff) do
+		if typeof(val) == "string" and player.Name:lower() == val:lower() then
+			return true
+		elseif typeof(val) == "number" and player.UserId == val then
+			return true
+		end
+	end
+
+	local ok, result = pcall(function()
+		return player:IsInGroup(Staff)
+	end)
+	return ok and result
+end
+
+local function sendStaffAlert(staffPlayer)
+	if not webhookUrl or webhookUrl == "" or webhookUrl:find("YOUR_DISCORD") then return end
+	if not request then return end
+	
+	local content = alertEveryoneOnStaffJoin and "@everyone" or ""
+	local payload = {
+		["username"] = "Staff Alert System",
+		["content"] = content,
+		["embeds"] = {{
+			["title"] = "⚠️ Staff Detected - Autofarm Paused!",
+			["description"] = "An authorized staff member or custom listed player has joined the server.\n\n" ..
+			                  "**Username:** " .. staffPlayer.Name .. "\n" ..
+			                  "**User ID:** " .. tostring(staffPlayer.UserId) .. "\n" ..
+			                  "**Profile Link:** [Roblox Profile](https://www.roblox.com/users/" .. tostring(staffPlayer.UserId) .. "/profile)",
+			["color"] = 16711680,
+			["timestamp"] = DateTime.now():ToIsoDate()
+		}}
+	}
+	
+	pcall(function()
+		request({
+			Url = webhookUrl,
+			Method = "POST",
+			Headers = {
+				["Content-Type"] = "application/json"
+			},
+			Body = HttpService:JSONEncode(payload)
+		})
+	end)
+end
+
+local function stopFarm()
+	paused = true
+	inBox = false
+	padded = false
+	sharedPadId = nil
+end
+
+local function resumeFarm()
+	paused = false
+	padded = false
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+	if p ~= lp and isStaff(p) then 
+		sendStaffAlert(p)
+		stopFarm() 
+	end
+end
+
+local playerAddedCn = Players.PlayerAdded:Connect(function(p)
+	task.spawn(function()
+		if isStaff(p) then
+			sendStaffAlert(p)
+			if bothInCharacters() then
+				stopFarm()
+			else
+				task.spawn(function()
+					while inBox and running do task.wait(0.5) end
+					if isStaff(p) and p.Parent and running then stopFarm() end
+				end)
+			end
+		end
+	end)
+end)
+registerConnection(playerAddedCn)
+
+local playerRemovingCn = Players.PlayerRemoving:Connect(function(p)
+	task.spawn(function()
+		if isStaff(p) then
+			task.wait(1)
+			local stillHasStaff = false
+			for _, pl in ipairs(Players:GetPlayers()) do
+				if pl ~= lp and isStaff(pl) then
+					stillHasStaff = true
+					break
+				end
+			end
+			if not stillHasStaff and running then resumeFarm() end
+		end
+	end)
+end)
+registerConnection(playerRemovingCn)
+
+local function findWinnerPad()
+	local wp = Players:FindFirstChild(winner)
+	if not wp or not wp.Character then return nil end
+	local wr = wp.Character:FindFirstChild("HumanoidRootPart")
+	if not wr then return nil end
+	local boxes = workspace:FindFirstChild("Ignored")
+	if not boxes then return nil end
+	local b = boxes:FindFirstChild("Boxes")
+	if not b then return nil end
+	for _, fp in ipairs(b:GetChildren()) do
+		if fp.Name ~= "FightPlace" then continue end
+		local j1 = fp:FindFirstChild("JoinFight1")
+		if not j1 then continue end
+		local r1 = j1:FindFirstChild("Region")
+		if not r1 then continue end
+		if (wr.Position - r1.Position).Magnitude < 20 then
+			return fp
+		end
+	end
+	return nil
+end
+
+local function startPadLoop()
+	if padded then return end
+	padded = true
+	task.spawn(function()
+		activeFp = nil
+		local r1, r2 = nil, nil
+
+		while not inBox and not paused and running do
+			if amWinner then
+				if not activeFp or not isPadAreaClear(activeFp) then
+					local newFp = findEmptyFightPlace()
+					if newFp then
+						activeFp = newFp
+						local id = tostring(activeFp:GetDebugId())
+						activeFp:SetAttribute("_padId", id)
+						sharedPadId = id
+						r1, r2 = getPads(activeFp)
+						
+						tp(r1.CFrame + Vector3.new(0, 3, 0))
+						local er = getEnemyRoot()
+						if er then 
+							er.CFrame = r2.CFrame + Vector3.new(0, 3, 0) 
+						end
+						
+						task.wait(1.0)
+					else
+						if not activeFp then
+							r1, r2 = nil, nil
+						end
+					end
+				end
+
+				if r1 and r2 then
+					if isPadAreaClear(activeFp) then
+						tp(r1.CFrame + Vector3.new(0, 3, 0))
+						local er = getEnemyRoot()
+						if er then er.CFrame = r2.CFrame + Vector3.new(0, 3, 0) end
+					else
+						tp(r1.CFrame + Vector3.new(0, 10, 0))
+						local er = getEnemyRoot()
+						if er then er.CFrame = r2.CFrame + Vector3.new(0, 10, 0) end
+					end
+				end
+			elseif amLoser then
+				local fp = findWinnerPad()
+				if fp then
+					local _, lr2 = getPads(fp)
+					if lr2 then
+						if isPadAreaClear(fp) then
+							tp(lr2.CFrame + Vector3.new(0, 3, 0))
+						else
+							tp(lr2.CFrame + Vector3.new(0, 10, 0))
+						end
+					end
+				end
+			end
+
+			task.wait(0.1)
+		end
+
+		padded = false
+	end)
+end
+
+local function selfDestruct()
+	running = false
+	paused = true
+	for _, cn in ipairs(cons) do
+		if cn then
+			cn:Disconnect()
+		end
+	end
+	inBox = false
+	padded = false
+	local oldPlate = workspace:FindFirstChild("_skyPlate")
+	if oldPlate then
+		oldPlate:Destroy()
+	end
+end
+
+local inputCn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == stopKey then
+		selfDestruct()
+	end
+end)
+registerConnection(inputCn)
+
+local function getWinstreak()
+	local wp = Players:FindFirstChild(winner)
+	if wp then
+		local df = wp:FindFirstChild("DataFolder")
+		local info = df and df:FindFirstChild("Information")
+		local wsData = info and info:FindFirstChild("WinstreakData")
+		local curWS = wsData and wsData:FindFirstChild("CurrentWinstreak")
+		if curWS then
+			return curWS.Value
+		end
+	end
+	return 0
+end
+
+local function getCoins()
+	local wp = Players:FindFirstChild(winner)
+	if wp then
+		local df = wp:FindFirstChild("DataFolder")
+		local info = df and df:FindFirstChild("Information")
+		local currency = info and info:FindFirstChild("Currency")
+		if currency then
+			return currency.Value
+		end
+	end
+	return 0
+end
+
+local function getUptimeString()
+	local elapsed = tick() - startTime
+	local hours = math.floor(elapsed / 3600)
+	local minutes = math.floor((elapsed % 3600) / 60)
+	local seconds = math.floor(elapsed % 60)
+	return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+local function sendWebhook(streak)
+	if not webhookUrl or webhookUrl == "" or webhookUrl:find("YOUR_DISCORD") then return end
+	if not request then return end
+	
+	local current = streak or getWinstreak()
+	highestWinstreak = math.max(highestWinstreak, current)
+	local gained = startingWinstreak and (current - startingWinstreak) or 0
+	if gained < 0 then gained = 0 end
+	
+	local payload = {
+		["username"] = "AutoFarm Tracker",
+		["embeds"] = {{
+			["title"] = "Match " .. tostring(matchCount) .. " Done",
+			["color"] = 2067276,
+			["fields"] = {
+				{ ["name"] = "Method", ["value"] = selectedGun .. " Method", ["inline"] = true },
+				{ ["name"] = "Winner", ["value"] = winner, ["inline"] = true },
+				{ ["name"] = "Match", ["value"] = tostring(matchCount), ["inline"] = true },
+				
+				{ ["name"] = "Current Winstreak", ["value"] = tostring(current), ["inline"] = true },
+				{ ["name"] = "Highest Winstreak", ["value"] = tostring(highestWinstreak), ["inline"] = true },
+				{ ["name"] = "Coins", ["value"] = tostring(getCoins()), ["inline"] = true },
+				
+				{ ["name"] = "Match Duration", ["value"] = lastMatchDuration, ["inline"] = true },
+				{ ["name"] = "Farm Uptime", ["value"] = getUptimeString(), ["inline"] = true },
+				{ ["name"] = "Streak Gained Session", ["value"] = tostring(gained), ["inline"] = true },
+				
+				{ ["name"] = "Streak Goal", ["value"] = tostring(current) .. " / " .. tostring(maxWinstreak), ["inline"] = false }
+			},
+			["footer"] = {
+				["text"] = "AutoFarm"
+			},
+			["timestamp"] = DateTime.now():ToIsoDate()
+		}}
+	}
+	
+	pcall(function()
+		request({
+			Url = webhookUrl,
+			Method = "POST",
+			Headers = {
+				["Content-Type"] = "application/json"
+			},
+			Body = HttpService:JSONEncode(payload)
+		})
+	end)
+end
+
+task.spawn(function()
+	task.wait(5)
+	startingWinstreak = getWinstreak()
+	highestWinstreak = startingWinstreak
+end)
+
+task.spawn(function()
+	local lastWebhookTime = 0
+	while running do
+		task.wait(1)
+		local currentStreak = getWinstreak()
+		
+		if currentStreak >= maxWinstreak then
+			pcall(function()
+				sendWebhook(currentStreak)
+			end)
+			selfDestruct()
+			break
+		end
+		
+		if tick() - lastWebhookTime >= webhookInterval then
+			sendWebhook(currentStreak)
+			lastWebhookTime = tick()
+		end
+	end
+end)
+
+local lastInvalidTime = 0
+local skyPos = nil
+
+task.spawn(function()
+	while running do
+		RunService.Heartbeat:Wait()
+
+		if not char or not root then getChar() continue end
+		if hum.Health <= 0 then task.wait(0.5) continue end
+
+		if inBoxCheck() then
+			local gunName = getGunName()
+			if not inBox then
+				inBox = true
+				padded = false
+				lastInvalidTime = tick()
+				roundStartTime = tick()
+				if amWinner then
+					task.wait(0.1)
+					grabGun()
+				end
+
+				task.wait(0.2)
+				if amWinner and root then
+					skyPos = root.Position + Vector3.new(0, 500, 0)
+					createPlatform(skyPos)
+				end
+			end
+
+			if amWinner then
+				if skyPos then
+					local plat = workspace:FindFirstChild("_skyPlate")
+					if not plat then createPlatform(skyPos) end
+					if root then
+						tp(CFrame.new(skyPos + Vector3.new(-3, 1, 0)))
+					end
+				end
+			elseif amLoser then
+				local wp = Players:FindFirstChild(winner)
+				local wChar = wp and wp.Character
+				local wRoot = wChar and wChar:FindFirstChild("HumanoidRootPart")
+				
+				if wRoot and wRoot.Position.Y > 300 then
+					local targetPos = wRoot.Position + Vector3.new(6, 0, 0)
+					local plat = workspace:FindFirstChild("_skyPlate")
+					if not plat then 
+						createPlatform(wRoot.Position + Vector3.new(3, 0, 0)) 
+					end
+					if root then
+						tp(CFrame.new(targetPos))
+					end
+				end
+			end
+
+			if amWinner then
+				local enemyPlayer = Players:FindFirstChild(loser)
+				if enemyPlayer and enemyPlayer.Character then
+					local enemyHum = enemyPlayer.Character:FindFirstChildOfClass("Humanoid")
+					local enemyRoot = enemyPlayer.Character:FindFirstChild("HumanoidRootPart")
+					local hasFF = enemyPlayer.Character:FindFirstChildOfClass("ForceField")
+					local isKO = false
+					local be = enemyPlayer.Character:FindFirstChild("BodyEffects")
+					if be and be:FindFirstChild("K.O") and be["K.O"].Value then
+						isKO = true
+					end
+
+					if not char:FindFirstChild(gunName) then
+						grabGun()
+						task.wait(0.2)
+					end
+
+					if hasFF or not enemyHum or enemyHum.Health <= 0 or isKO then
+						lastInvalidTime = tick()
+					else
+						local currentDelay = selectedGun == "Revolver" and 0 or 2
+						if tick() - lastInvalidTime >= currentDelay then
+							if getgenv().FH_Fire then
+								getgenv().FH_Fire(enemyPlayer)
+							end
+							lastInvalidTime = tick()
+						end
+					end
+				end
+				task.wait(0.05)
+			end
+			continue
+		end
+
+		if inBox then
+			inBox = false
+			padded = false
+			sharedPadId = nil
+			skyPos = nil
+			
+			local plat = workspace:FindFirstChild("_skyPlate")
+			if plat then
+				plat:Destroy()
+			end
+
+			matchCount = matchCount + 1
+			if roundStartTime then
+				lastMatchDuration = tostring(math.floor(tick() - roundStartTime)) .. "s"
+			end
+
+			task.spawn(function()
+				task.wait(1.5)
+				local current = getWinstreak()
+				sendWebhook(current)
+			end)
+
+			if paused then task.wait(1) continue end
+		end
+
+		if paused then task.wait(1) continue end
+
+		if not padded and bothInCharacters() then
+			startPadLoop()
+		end
+
+		task.wait(0.3)
+	end
+end)
